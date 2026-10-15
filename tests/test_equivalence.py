@@ -6,6 +6,7 @@ with `pytest -m slow`.
 """
 import pytest
 import reference as R
+
 import solve as S
 
 

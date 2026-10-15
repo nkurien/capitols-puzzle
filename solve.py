@@ -1,4 +1,9 @@
-import sys, time, threading, argparse, logging
+import argparse
+import logging
+import sys
+import threading
+import time
+
 from ortools.sat.python import cp_model
 
 log = logging.getLogger("capitols")
@@ -74,65 +79,65 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
         for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             if (r + dr, c + dc) in idx:
                 yield idx[(r + dr, c + dc)]
-    lab = [m.NewIntVar(0, i, f'lab{i}') for i in range(n)]
+    lab = [m.new_int_var(0, i, f'lab{i}') for i in range(n)]
     b = {}
     for i in range(n):
         bs = []
         for r in range(i + 1):
-            b[i, r] = m.NewBoolVar('')
+            b[i, r] = m.new_bool_var('')
             bs.append(b[i, r])
-        m.AddExactlyOne(bs)
-        m.Add(lab[i] == sum(r * b[i, r] for r in range(i + 1)))
+        m.add_exactly_one(bs)
+        m.add(lab[i] == sum(r * b[i, r] for r in range(i + 1)))
         for r in range(i):
-            m.AddImplication(b[i, r], b[r, r])
+            m.add_implication(b[i, r], b[r, r])
     t = stage(m, 'labels', t_build)
     edges = [(i, j) for i in range(n) for j in nbrs(i) if i < j]
     same = {}
     for (i, j) in edges:
-        s = m.NewBoolVar('')
-        m.Add(lab[i] == lab[j]).OnlyEnforceIf(s)
-        m.Add(lab[i] != lab[j]).OnlyEnforceIf(s.Not())
+        s = m.new_bool_var('')
+        m.add(lab[i] == lab[j]).OnlyEnforceIf(s)
+        m.add(lab[i] != lab[j]).OnlyEnforceIf(s.Not())
         same[i, j] = same[j, i] = s
     t = stage(m, 'same-state edges', t)
     # connectivity
-    h = [m.NewIntVar(0, n, '') for i in range(n)]
+    h = [m.new_int_var(0, n, '') for i in range(n)]
     for i in range(n):
-        m.Add(h[i] == 0).OnlyEnforceIf(b[i, i])
-        m.Add(h[i] >= 1).OnlyEnforceIf(b[i, i].Not())
+        m.add(h[i] == 0).OnlyEnforceIf(b[i, i])
+        m.add(h[i] >= 1).OnlyEnforceIf(b[i, i].Not())
         par = []
         for j in nbrs(i):
-            p = m.NewBoolVar('')
-            m.AddImplication(p, same[i, j])
-            m.Add(h[j] < h[i]).OnlyEnforceIf(p)
+            p = m.new_bool_var('')
+            m.add_implication(p, same[i, j])
+            m.add(h[j] < h[i]).OnlyEnforceIf(p)
             par.append(p)
-        m.AddBoolOr(par + [b[i, i]])
+        m.add_bool_or(par + [b[i, i]])
     t = stage(m, 'connectivity', t)
     # sizes
-    size = [m.NewIntVar(0, n, '') for r in range(n)]
+    size = [m.new_int_var(0, n, '') for r in range(n)]
     for r in range(n):
-        m.Add(size[r] == sum(b[i, r] for i in range(r, n)))
-    sz = [m.NewIntVar(1, n, '') for i in range(n)]
+        m.add(size[r] == sum(b[i, r] for i in range(r, n)))
+    sz = [m.new_int_var(1, n, '') for i in range(n)]
     for i in range(n):
-        m.AddElement(lab[i], size[:i + 1], sz[i])
+        m.add_element(lab[i], size[:i + 1], sz[i])
     t = stage(m, 'state sizes', t)
     # symmetry
     T = {}
-    tvar = [m.NewIntVar(0, len(G) - 1, '') for i in range(n)]
+    tvar = [m.new_int_var(0, len(G) - 1, '') for i in range(n)]
     for i in range(n):
         opts = []
         for gi, img in enumerate(images):
             j = img[i]
             if j is None:
                 continue
-            v = m.NewBoolVar('')
+            v = m.new_bool_var('')
             T[i, gi] = v
             opts.append((gi, v))
             if j != i:
-                m.Add(lab[j] == lab[i]).OnlyEnforceIf(v)
-        m.AddExactlyOne([v for _, v in opts])
-        m.Add(tvar[i] == sum(gi * v for gi, v in opts))
+                m.add(lab[j] == lab[i]).OnlyEnforceIf(v)
+        m.add_exactly_one([v for _, v in opts])
+        m.add(tvar[i] == sum(gi * v for gi, v in opts))
     for (i, j) in edges:
-        m.Add(tvar[i] == tvar[j]).OnlyEnforceIf(same[i, j])
+        m.add(tvar[i] == tvar[j]).OnlyEnforceIf(same[i, j])
     t = stage(m, 'symmetry', t)
     # capitols
     eqcache = {}
@@ -141,57 +146,57 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
             return same[i, j]
         key = (min(i, j), max(i, j))
         if key not in eqcache:
-            s = m.NewBoolVar('')
-            m.Add(lab[i] == lab[j]).OnlyEnforceIf(s)
-            m.Add(lab[i] != lab[j]).OnlyEnforceIf(s.Not())
+            s = m.new_bool_var('')
+            m.add(lab[i] == lab[j]).OnlyEnforceIf(s)
+            m.add(lab[i] != lab[j]).OnlyEnforceIf(s.Not())
             eqcache[key] = s
         return eqcache[key]
-    cap = [m.NewBoolVar(f'cap{i}') for i in range(n)]
+    cap = [m.new_bool_var(f'cap{i}') for i in range(n)]
     for (r, c), v in clues.items():
         # a clue of 0 sits on a capitol; any positive clue does not
-        m.Add(cap[idx[(r, c)]] == (1 if v == 0 else 0))
+        m.add(cap[idx[(r, c)]] == (1 if v == 0 else 0))
     for i in range(n):
         ors = []
         for gi, img in enumerate(images):
             if img[i] != i:  # only transforms that fix this cell can make it a capitol
                 continue
             others = [j for j in fixed_at[gi] if j != i]
-            a = m.NewBoolVar('')
-            m.AddImplication(a, T[i, gi])
+            a = m.new_bool_var('')
+            m.add_implication(a, T[i, gi])
             for j in others:
-                m.AddImplication(a, eq(i, j).Not())
+                m.add_implication(a, eq(i, j).Not())
             # if T and all others not same -> a
-            m.AddBoolOr([a, T[i, gi].Not()] + [eq(i, j) for j in others])
+            m.add_bool_or([a, T[i, gi].Not()] + [eq(i, j) for j in others])
             ors.append(a)
-        m.AddBoolOr(ors).OnlyEnforceIf(cap[i])
+        m.add_bool_or(ors).OnlyEnforceIf(cap[i])
         for a in ors:
-            m.AddImplication(a, cap[i])
+            m.add_implication(a, cap[i])
     # A capitol's state is mapped to itself by an involution (reflection or R2) that fixes only the
     # capitol, so the remaining cells pair up and the state size is odd. Implied, but it links the
     # capitol and size variables directly for propagation.
-    half = [m.NewIntVar(0, n // 2, '') for i in range(n)]
+    half = [m.new_int_var(0, n // 2, '') for i in range(n)]
     for i in range(n):
-        m.Add(sz[i] == 2 * half[i] + 1).OnlyEnforceIf(cap[i])
+        m.add(sz[i] == 2 * half[i] + 1).OnlyEnforceIf(cap[i])
     t = stage(m, 'capitols', t)
     # distances
-    d = [m.NewIntVar(0, maxd, f'd{i}') for i in range(n)]
+    d = [m.new_int_var(0, maxd, f'd{i}') for i in range(n)]
     w = {}
     for (i, j) in edges:
-        v = m.NewIntVar(1, n, '')
-        m.AddMinEquality(v, [sz[i], sz[j]])
+        v = m.new_int_var(1, n, '')
+        m.add_min_equality(v, [sz[i], sz[j]])
         w[i, j] = w[j, i] = v
     for i in range(n):
-        m.Add(d[i] == 0).OnlyEnforceIf(cap[i])
-        m.Add(d[i] >= 1).OnlyEnforceIf(cap[i].Not())
+        m.add(d[i] == 0).OnlyEnforceIf(cap[i])
+        m.add(d[i] >= 1).OnlyEnforceIf(cap[i].Not())
         par = []
         for j in nbrs(i):
-            m.Add(d[i] <= d[j] + w[i, j])
-            p = m.NewBoolVar('')
-            m.Add(d[i] == d[j] + w[i, j]).OnlyEnforceIf(p)
+            m.add(d[i] <= d[j] + w[i, j])
+            p = m.new_bool_var('')
+            m.add(d[i] == d[j] + w[i, j]).OnlyEnforceIf(p)
             par.append(p)
-        m.AddBoolOr(par + [cap[i]])
+        m.add_bool_or(par + [cap[i]])
     for (r, c), v in clues.items():
-        m.Add(d[idx[(r, c)]] == v)
+        m.add(d[idx[(r, c)]] == v)
     t = stage(m, 'distances + clues', t)
     # cuts: forbid (state==S with capitol at cell)
     for S, capcell in cuts:
@@ -202,11 +207,11 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
             for j in nbrs(idx[x]):
                 if cells[j] not in Sset and j > rep:
                     bnd.add(j)
-        m.AddBoolOr([b[idx[x], rep].Not() for x in S] + [b[j, rep] for j in bnd] + [cap[idx[capcell]].Not()])
+        m.add_bool_or([b[idx[x], rep].Not() for x in S] + [b[j, rep] for j in bnd] + [cap[idx[capcell]].Not()])
     t = stage(m, 'cuts', t)
     # exclude: label vectors of partitions already found, so repeated solves enumerate every solution
     for L in exclude:
-        m.AddBoolOr([b[i, L[i]].Not() for i in range(n)])
+        m.add_bool_or([b[i, L[i]].Not() for i in range(n)])
     solver = cp_model.CpSolver()
     solver.parameters.num_workers = workers
     solver.parameters.max_time_in_seconds = tlimit
@@ -263,13 +268,13 @@ def run(N, clues, verbose=False, **kw):
         log.info('[check] %d cut(s) total; re-solving', len(cuts))
 
 def report(N, res):
-    L, caps, D, states = res
+    L, caps, _, states = res
     sizes = [len(states[L[i]]) for i in range(N * N)]
     for r in range(N):
-        print(' '.join('%3d' % sizes[r * N + c] for c in range(N)))
+        print(' '.join(f'{sizes[r * N + c]:3d}' for c in range(N)))
     print()
     for r in range(N):
-        print(' '.join('%3d' % L[r * N + c] for c in range(N)))
+        print(' '.join(f'{L[r * N + c]:3d}' for c in range(N)))
     print('caps', caps)
     rows = [sum(sizes[r * N:(r + 1) * N]) for r in range(N)]
     print('rows', rows, 'answer', sum(x * x for x in rows))

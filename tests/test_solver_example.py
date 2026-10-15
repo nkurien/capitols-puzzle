@@ -1,6 +1,8 @@
 """End-to-end check of the 5x5 example, validated independently of the CP-SAT model."""
 import heapq
+
 import pytest
+
 import solve as S
 
 N = 5
@@ -21,7 +23,7 @@ def neighbours(r, c):
 
 
 def test_states_partition_the_grid(result):
-    L, caps, D, states = result
+    *_, states = result
     cells = sorted(x for S_ in states.values() for x in S_)
     assert cells == [(r, c) for r in range(N) for c in range(N)]
 
@@ -41,9 +43,9 @@ def test_states_are_connected(result):
 
 
 def test_every_state_is_symmetric_with_a_single_fixed_cell_per_symmetry(result):
-    L, caps, D, states = result
+    _, caps, _, states = result
     G = S.transforms(N)
-    for l, S_ in states.items():
+    for S_ in states.values():
         cap, has_sym = S.full_group_ok(S_, N, G)
         assert has_sym
         for c in caps:
@@ -52,7 +54,7 @@ def test_every_state_is_symmetric_with_a_single_fixed_cell_per_symmetry(result):
 
 
 def test_at_most_one_capitol_per_state(result):
-    L, caps, D, states = result
+    _, caps, _, states = result
     for S_ in states.values():
         assert sum(c in S_ for c in caps) <= 1
 
@@ -80,7 +82,7 @@ def test_clues_are_met_by_independent_dijkstra(result):
 
 
 def test_known_answer(result):
-    L, caps, D, states = result
+    L, _, _, states = result
     sizes = [len(states[L[i]]) for i in range(N * N)]
     rows = [sum(sizes[r * N:(r + 1) * N]) for r in range(N)]
     assert sum(x * x for x in rows) == 8045
