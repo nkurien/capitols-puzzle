@@ -112,13 +112,13 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
             par.append(p)
         m.add_bool_or(par + [b[i, i]])
     t = stage(m, 'connectivity', t)
-    # sizes
-    size = [m.new_int_var(0, n, '') for r in range(n)]
-    for r in range(n):
-        m.add(size[r] == sum(b[i, r] for i in range(r, n)))
+    # sizes: counted at the state's root, then carried to every cell along same-state edges
+    # (states are connected, so each cell reaches its root through such edges)
     sz = [m.new_int_var(1, n, '') for i in range(n)]
-    for i in range(n):
-        m.add_element(lab[i], size[:i + 1], sz[i])
+    for r in range(n):
+        m.add(sz[r] == sum(b[i, r] for i in range(r, n))).OnlyEnforceIf(b[r, r])
+    for (i, j) in edges:
+        m.add(sz[i] == sz[j]).OnlyEnforceIf(same[i, j])
     t = stage(m, 'state sizes', t)
     # symmetry
     T = {}
@@ -132,10 +132,18 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
             v = m.new_bool_var('')
             T[i, gi] = v
             opts.append((gi, v))
-            if j != i:
-                m.add(lab[j] == lab[i]).OnlyEnforceIf(v)
         m.add_exactly_one([v for _, v in opts])
         m.add(tvar[i] == sum(gi * v for gi, v in opts))
+    # Every transform left in G is an involution, so i -> j means j -> i. Handle each pair once: if i
+    # uses the transform, j is in its state, and a connected state shares one transform, so T[j] too.
+    for gi, img in enumerate(images):
+        for i in range(n):
+            j = img[i]
+            if j is not None and i < j:
+                assert img[j] == i
+                m.add(lab[i] == lab[j]).OnlyEnforceIf(T[i, gi])
+                m.add_implication(T[i, gi], T[j, gi])
+                m.add_implication(T[j, gi], T[i, gi])
     for (i, j) in edges:
         m.add(tvar[i] == tvar[j]).OnlyEnforceIf(same[i, j])
     t = stage(m, 'symmetry', t)
@@ -177,6 +185,8 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     half = [m.new_int_var(0, n // 2, '') for i in range(n)]
     for i in range(n):
         m.add(sz[i] == 2 * half[i] + 1).OnlyEnforceIf(cap[i])
+        # a one-cell state is symmetric about itself and so is always its own capitol
+        m.add(sz[i] >= 2).OnlyEnforceIf(cap[i].Not())
     t = stage(m, 'capitols', t)
     # distances
     d = [m.new_int_var(0, maxd, f'd{i}') for i in range(n)]
