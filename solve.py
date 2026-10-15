@@ -140,6 +140,9 @@ def solve(N, clues, maxd=400, cuts=None, verbose=False, workers=8, tlimit=3000, 
             eqcache[key] = s
         return eqcache[key]
     cap = [m.NewBoolVar(f'cap{i}') for i in range(n)]
+    for (r, c), v in clues.items():
+        # a clue of 0 sits on a capitol; any positive clue does not
+        m.Add(cap[idx[(r, c)]] == (1 if v == 0 else 0))
     for i in range(n):
         r, c = cells[i]
         ors = []
@@ -195,6 +198,7 @@ def solve(N, clues, maxd=400, cuts=None, verbose=False, workers=8, tlimit=3000, 
     solver.parameters.num_workers = workers
     solver.parameters.max_time_in_seconds = tlimit
     solver.parameters.log_search_progress = verbose
+    solver.parameters.log_to_stdout = False  # route through log_callback only, else every line prints twice
     if verbose:
         solver.log_callback = lambda line: log.debug('[cp-sat] %s', line)
     stop = threading.Event()
