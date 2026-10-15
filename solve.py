@@ -55,11 +55,19 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     exclude = exclude or []
     log.info('[build] starting model: N=%d, %d clues, %d cuts, maxd=%d', N, len(clues), len(cuts), maxd)
     t_build = time.time()
-    G = transforms(N)
-    log.info('[build] %d candidate symmetry transforms', len(G))
+    G_full = transforms(N)
+    # A 90-degree rotation about a centre implies the 180-degree rotation about the same centre, and
+    # both fix exactly the same cells, so any state that could use R4 can use R2 with an identical
+    # capitol outcome. The model therefore skips R4; G_full keeps it for the check in run().
+    G = [g for g in G_full if g[0] != 'R4']
+    log.info('[build] %d candidate symmetry transforms (%d with R4, used only for verification)', len(G), len(G_full))
     cells = [(r, c) for r in range(N) for c in range(N)]
     idx = {x: i for i, x in enumerate(cells)}
     n = len(cells)
+    # image of every cell under every transform as a cell index (None if it leaves the grid), and
+    # the cells each transform fixes: computed once instead of per cell inside the model loops
+    images = [[idx.get(g[2](r, c)) for (r, c) in cells] for g in G]
+    fixed_at = [[i for i in range(n) if img[i] == i] for img in images]
     m = cp_model.CpModel()
     def nbrs(i):
         r, c = cells[i]
@@ -111,16 +119,14 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     T = {}
     tvar = [m.NewIntVar(0, len(G) - 1, '') for i in range(n)]
     for i in range(n):
-        r, c = cells[i]
         opts = []
-        for gi, g in enumerate(G):
-            img = g[2](r, c)
-            if img not in idx:
+        for gi, img in enumerate(images):
+            j = img[i]
+            if j is None:
                 continue
             v = m.NewBoolVar('')
             T[i, gi] = v
             opts.append((gi, v))
-            j = idx[img]
             if j != i:
                 m.Add(lab[j] == lab[i]).OnlyEnforceIf(v)
         m.AddExactlyOne([v for _, v in opts])
@@ -145,14 +151,11 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
         # a clue of 0 sits on a capitol; any positive clue does not
         m.Add(cap[idx[(r, c)]] == (1 if v == 0 else 0))
     for i in range(n):
-        r, c = cells[i]
         ors = []
-        for gi, g in enumerate(G):
-            if (i, gi) not in T:
+        for gi, img in enumerate(images):
+            if img[i] != i:  # only transforms that fix this cell can make it a capitol
                 continue
-            if g[2](r, c) != (r, c):
-                continue
-            others = [idx[x] for x in fixed(g, N) if x != (r, c)]
+            others = [j for j in fixed_at[gi] if j != i]
             a = m.NewBoolVar('')
             m.AddImplication(a, T[i, gi])
             for j in others:
@@ -223,7 +226,7 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     L = [solver.Value(lab[i]) for i in range(n)]
     caps = [cells[i] for i in range(n) if solver.Value(cap[i])]
     D = [solver.Value(d[i]) for i in range(n)]
-    return L, caps, D, G
+    return L, caps, D, G_full
 
 def run(N, clues, verbose=False, **kw):
     cuts = []
