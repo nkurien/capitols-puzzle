@@ -8,7 +8,9 @@ brute-force rules in tests/reference.py, so a speedup can't come from an invalid
     python bench.py -n 7 8 --seeds 3 --time 120
 """
 import argparse
+import concurrent.futures
 import functools
+import itertools
 import random
 import time
 
@@ -83,32 +85,44 @@ def verify(N, clues, res):
         assert dist[cell] == want, f"clue {cell}={want} but reference distance is {dist[cell]}"
 
 
+def run_one(job):
+    N, seed, density, workers, tlimit = job
+    clues = make_instance(N, seed, density)
+    t = time.time()
+    try:
+        res = S.run(N, clues, workers=workers, tlimit=tlimit)
+        if res:
+            verify(N, clues, res)
+            status = 'solved'
+        else:
+            status = 'INFEASIBLE (bug: a solution exists)'
+    except TimeoutError:
+        status = 'timeout'
+    return N, seed, len(clues), time.time() - t, status
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('-n', type=int, nargs='+', default=[6, 7, 8])
     ap.add_argument('--seeds', type=int, default=5)
+    ap.add_argument('--first-seed', type=int, default=0)
+    ap.add_argument('--repeat', type=int, default=1, help='solve each instance this many times')
     ap.add_argument('--time', type=int, default=60, help='time limit per instance, seconds')
-    ap.add_argument('--workers', type=int, default=8)
+    ap.add_argument('--workers', type=int, default=8, help='CP-SAT threads per instance')
+    ap.add_argument('--jobs', type=int, default=1,
+                    help='instances solved at once; use with --workers 1 for reproducible, parallel timings')
     ap.add_argument('--density', type=float, default=0.35, help='fraction of cells given as clues')
     args = ap.parse_args()
-    total = 0.0
-    for N in args.n:
-        for seed in range(args.seeds):
-            clues = make_instance(N, seed, args.density)
-            t = time.time()
-            try:
-                res = S.run(N, clues, workers=args.workers, tlimit=args.time)
-                status = 'solved' if res else 'INFEASIBLE'
-                if res:
-                    verify(N, clues, res)
-                else:
-                    status = 'INFEASIBLE (bug: a solution exists)'
-            except TimeoutError:
-                status = 'timeout'
-            dt = time.time() - t
+    jobs = [(N, seed, args.density, args.workers, args.time)
+            for N in args.n
+            for seed, _ in itertools.product(range(args.first_seed, args.first_seed + args.seeds), range(args.repeat))]
+    total = timeouts = 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        for N, seed, k, dt, status in pool.map(run_one, jobs):
             total += dt
-            print(f'N={N} seed={seed} clues={len(clues):3d}  {dt:6.1f}s  {status}', flush=True)
-    print(f'total {total:.1f}s')
+            timeouts += status == 'timeout'
+            print(f'N={N} seed={seed} clues={k:3d}  {dt:6.1f}s  {status}', flush=True)
+    print(f'total {total:.1f}s  ({timeouts} timeouts)')
 
 
 if __name__ == '__main__':

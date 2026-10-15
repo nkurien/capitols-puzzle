@@ -45,3 +45,19 @@ def test_full_group_ok(cells, cap):
 def test_full_group_ok_reports_no_symmetry():
     _, has_sym = S.full_group_ok([(0, 0), (0, 1), (0, 2), (1, 0)], 5, S.transforms(5))
     assert has_sym is False
+
+
+@pytest.mark.parametrize("N", [3, 4, 5, 6, 11])
+def test_undominated_matches_brute_force(N):
+    """The model drops a transform only if another agrees with it everywhere it is defined."""
+    G = [g for g in S.transforms(N) if g[0] != 'R4']
+    cells = [(r, c) for r in range(N) for c in range(N)]
+    idx = {x: i for i, x in enumerate(cells)}
+    images = [[idx.get(g[2](r, c)) for (r, c) in cells] for g in G]
+    tables = [{(i, x) for i, x in enumerate(img) if x is not None} for img in images]
+    dominated = {
+        k for k in range(len(G))
+        if any(o != k and (tables[k] < tables[o] or (tables[k] == tables[o] and o < k)) for o in range(len(G)))
+    }
+    assert set(range(len(G))) - set(S.undominated(images)) == dominated
+    assert dominated, "expected some redundant transforms (corner and edge-centred rotations)"

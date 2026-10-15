@@ -55,6 +55,30 @@ def full_group_ok(S, N, G):
         return None, True
     return caps.pop(), True
 
+def undominated(images):
+    """Indices of transforms worth modelling. A transform is redundant if another one agrees with it
+    everywhere it is defined: any state that can use it can use the other, with the same fixed cells
+    inside the state. Of exact duplicates the first is kept."""
+    index = {}  # (cell, image) -> transforms sending that cell there, so candidates are found directly
+    for k, img in enumerate(images):
+        for i, x in enumerate(img):
+            if x is not None:
+                index.setdefault((i, x), []).append(k)
+    keep = []
+    for k, img in enumerate(images):
+        c0 = next((i for i, x in enumerate(img) if x is not None), None)
+        if c0 is None:
+            continue
+        defined = [(i, x) for i, x in enumerate(img) if x is not None]
+        for o in index[c0, img[c0]]:
+            if o != k and all(images[o][i] == x for i, x in defined):
+                same_table = sum(x is not None for x in images[o]) == len(defined)
+                if not same_table or o < k:
+                    break
+        else:
+            keep.append(k)
+    return keep
+
 def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8, tlimit=3000, heartbeat=30):
     cuts = cuts or []
     exclude = exclude or []
@@ -65,13 +89,17 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     # both fix exactly the same cells, so any state that could use R4 can use R2 with an identical
     # capitol outcome. The model therefore skips R4; G_full keeps it for the check in run().
     G = [g for g in G_full if g[0] != 'R4']
-    log.info('[build] %d candidate symmetry transforms (%d with R4, used only for verification)', len(G), len(G_full))
     cells = [(r, c) for r in range(N) for c in range(N)]
     idx = {x: i for i, x in enumerate(cells)}
     n = len(cells)
     # image of every cell under every transform as a cell index (None if it leaves the grid), and
     # the cells each transform fixes: computed once instead of per cell inside the model loops
     images = [[idx.get(g[2](r, c)) for (r, c) in cells] for g in G]
+    n_before = len(G)
+    keep = undominated(images)
+    G, images = [G[k] for k in keep], [images[k] for k in keep]
+    log.info('[build] %d symmetry transforms in the model (%d with R4, %d before dropping redundant ones)',
+             len(G), len(G_full), n_before)
     fixed_at = [[i for i in range(n) if img[i] == i] for img in images]
     m = cp_model.CpModel()
     def nbrs(i):
@@ -120,30 +148,25 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     for (i, j) in edges:
         m.add(sz[i] == sz[j]).OnlyEnforceIf(same[i, j])
     t = stage(m, 'state sizes', t)
-    # symmetry
+    # symmetry. Every transform left in G is an involution (i -> j means j -> i). If i uses the
+    # transform, j is in its state, and a connected state shares one transform, so j uses it too: i and
+    # j therefore share a single variable, and the pair needs only one lab equality.
     T = {}
-    tvar = [m.new_int_var(0, len(G) - 1, '') for i in range(n)]
-    for i in range(n):
-        opts = []
-        for gi, img in enumerate(images):
-            j = img[i]
-            if j is None:
-                continue
-            v = m.new_bool_var('')
-            T[i, gi] = v
-            opts.append((gi, v))
-        m.add_exactly_one([v for _, v in opts])
-        m.add(tvar[i] == sum(gi * v for gi, v in opts))
-    # Every transform left in G is an involution, so i -> j means j -> i. Handle each pair once: if i
-    # uses the transform, j is in its state, and a connected state shares one transform, so T[j] too.
     for gi, img in enumerate(images):
         for i in range(n):
             j = img[i]
-            if j is not None and i < j:
-                assert img[j] == i
-                m.add(lab[i] == lab[j]).OnlyEnforceIf(T[i, gi])
-                m.add_implication(T[i, gi], T[j, gi])
-                m.add_implication(T[j, gi], T[i, gi])
+            if j is None or i > j:
+                continue
+            assert img[j] == i
+            v = m.new_bool_var('')
+            T[i, gi] = T[j, gi] = v
+            if i < j:
+                m.add(lab[i] == lab[j]).OnlyEnforceIf(v)
+    tvar = [m.new_int_var(0, len(G) - 1, '') for i in range(n)]
+    for i in range(n):
+        opts = [(gi, T[i, gi]) for gi in range(len(G)) if (i, gi) in T]
+        m.add_exactly_one([v for _, v in opts])
+        m.add(tvar[i] == sum(gi * v for gi, v in opts))
     for (i, j) in edges:
         m.add(tvar[i] == tvar[j]).OnlyEnforceIf(same[i, j])
     t = stage(m, 'symmetry', t)
@@ -169,6 +192,9 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
             if img[i] != i:  # only transforms that fix this cell can make it a capitol
                 continue
             others = [j for j in fixed_at[gi] if j != i]
+            if not others:  # nothing else to be in the same state as: T itself says i is the capitol
+                ors.append(T[i, gi])
+                continue
             a = m.new_bool_var('')
             m.add_implication(a, T[i, gi])
             for j in others:
