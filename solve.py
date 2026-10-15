@@ -166,6 +166,12 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
         m.AddBoolOr(ors).OnlyEnforceIf(cap[i])
         for a in ors:
             m.AddImplication(a, cap[i])
+    # A capitol's state is mapped to itself by an involution (reflection or R2) that fixes only the
+    # capitol, so the remaining cells pair up and the state size is odd. Implied, but it links the
+    # capitol and size variables directly for propagation.
+    half = [m.NewIntVar(0, n // 2, '') for i in range(n)]
+    for i in range(n):
+        m.Add(sz[i] == 2 * half[i] + 1).OnlyEnforceIf(cap[i])
     t = stage(m, 'capitols', t)
     # distances
     d = [m.NewIntVar(0, maxd, f'd{i}') for i in range(n)]
