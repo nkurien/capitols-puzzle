@@ -50,8 +50,9 @@ def full_group_ok(S, N, G):
         return None, True
     return caps.pop(), True
 
-def solve(N, clues, maxd=400, cuts=None, verbose=False, workers=8, tlimit=3000, heartbeat=30):
+def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8, tlimit=3000, heartbeat=30):
     cuts = cuts or []
+    exclude = exclude or []
     log.info('[build] starting model: N=%d, %d clues, %d cuts, maxd=%d', N, len(clues), len(cuts), maxd)
     t_build = time.time()
     G = transforms(N)
@@ -194,6 +195,9 @@ def solve(N, clues, maxd=400, cuts=None, verbose=False, workers=8, tlimit=3000, 
                     bnd.add(j)
         m.AddBoolOr([b[idx[x], rep].Not() for x in S] + [b[j, rep] for j in bnd] + [cap[idx[capcell]].Not()])
     t = stage(m, 'cuts', t)
+    # exclude: label vectors of partitions already found, so repeated solves enumerate every solution
+    for L in exclude:
+        m.AddBoolOr([b[i, L[i]].Not() for i in range(n)])
     solver = cp_model.CpSolver()
     solver.parameters.num_workers = workers
     solver.parameters.max_time_in_seconds = tlimit
@@ -212,6 +216,8 @@ def solve(N, clues, maxd=400, cuts=None, verbose=False, workers=8, tlimit=3000, 
     stop.set()
     log.info('[solve] finished: status=%s in %.1fs (conflicts=%d, branches=%d)',
              solver.StatusName(st), time.time() - t_solve, solver.NumConflicts(), solver.NumBranches())
+    if st == cp_model.UNKNOWN:
+        raise TimeoutError('CP-SAT hit the time limit before finding a solution or proving there is none')
     if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
     L = [solver.Value(lab[i]) for i in range(n)]
@@ -227,7 +233,7 @@ def run(N, clues, verbose=False, **kw):
         log.info('=== refinement round %d ===', it)
         res = solve(N, clues, cuts=cuts, verbose=verbose, **kw)
         if res is None:
-            log.warning('no solution found (infeasible or time limit hit)'); return None
+            log.warning('no solution found (model is infeasible)'); return None
         L, caps, D, G = res
         states = {}
         for i, l in enumerate(L):
@@ -285,6 +291,10 @@ if __name__ == '__main__':
                (7,2):17,(7,4):14,(7,7):10,(7,10):13,(8,0):30,(8,5):6,(8,8):45,
                (9,3):10,(10,1):26,(10,5):0,(10,8):77,(10,9):61}
         clues = raw
-    res = run(N, clues, verbose=args.cpsat_log, workers=args.workers, tlimit=args.time, heartbeat=args.heartbeat)
+    try:
+        res = run(N, clues, verbose=args.cpsat_log, workers=args.workers, tlimit=args.time, heartbeat=args.heartbeat)
+    except TimeoutError as e:
+        log.warning('%s', e)
+        sys.exit(1)
     if res:
         report(N, res)
