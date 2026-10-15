@@ -15,5 +15,10 @@ symmetry group, with cuts added and re-solved until they pass.
     python solve.py ex      # 5x5 example
     python solve.py main    # 11x11 puzzle
 
+## Tests
+
+    uv pip install -r requirements-dev.txt
+    pytest
+
 Options: `--workers N`, `--time SECONDS`, `--heartbeat SECONDS`,
 `--logfile PATH`, `--cpsat-log` (raw CP-SAT log).
