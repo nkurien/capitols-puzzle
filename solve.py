@@ -162,6 +162,7 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
             T[i, gi] = T[j, gi] = v
             if i < j:
                 m.add(lab[i] == lab[j]).OnlyEnforceIf(v)
+                m.add_implication(v, b[j, j].Not())
     tvar = [m.new_int_var(0, len(G) - 1, '') for i in range(n)]
     for i in range(n):
         opts = [(gi, T[i, gi]) for gi in range(len(G)) if (i, gi) in T]
