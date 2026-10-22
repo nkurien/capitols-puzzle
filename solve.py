@@ -79,7 +79,7 @@ def undominated(images):
             keep.append(k)
     return keep
 
-def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8, tlimit=3000, heartbeat=30):
+def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8, tlimit=3000, heartbeat=30, max_size=None, no_free_r2=False, min_max_size=None, clue_bounds=False):
     cuts = cuts or []
     exclude = exclude or []
     log.info('[build] starting model: N=%d, %d clues, %d cuts, maxd=%d', N, len(clues), len(cuts), maxd)
@@ -97,6 +97,10 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     images = [[idx.get(g[2](r, c)) for (r, c) in cells] for g in G]
     n_before = len(G)
     keep = undominated(images)
+    if no_free_r2:
+        # search restriction: drop 180-degree rotations that fix no cell. That rules out states whose only
+        # symmetry is such a rotation (S/Z-like shapes); anything found is still a genuine solution
+        keep = [k for k in keep if G[k][0] != 'R2' or any(images[k][i] == i for i in range(n))]
     G, images = [G[k] for k in keep], [images[k] for k in keep]
     log.info('[build] %d symmetry transforms in the model (%d with R4, %d before dropping redundant ones)',
              len(G), len(G_full), n_before)
@@ -142,7 +146,21 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
     t = stage(m, 'connectivity', t)
     # sizes: counted at the state's root, then carried to every cell along same-state edges
     # (states are connected, so each cell reaches its root through such edges)
-    sz = [m.new_int_var(1, n, '') for i in range(n)]
+    # max_size caps every state's size: any solution found is still genuine, it only narrows the search
+    sz = [m.new_int_var(1, max_size or n, '') for i in range(n)]
+    if clue_bounds:
+        # size lower bounds read straight off the clues (presolve doesn't find them, as the edge weights
+        # start with upper bound n). A cell between neighbours u and v is crossed by a two-edge route
+        # costing at most twice its size, so 2*sz >= |d_u - d_v|; a singleton is a capitol, so all its
+        # neighbours are within distance 1, and a cell next to a clue of 2 or more is not one
+        cv = {idx[x]: v for x, v in clues.items()}
+        for x in range(n):
+            near = [cv[u] for u in nbrs(x) if u in cv]
+            lb = 2 if any(v >= 2 for v in near) else 1
+            if near:
+                lb = max(lb, (max(near) - min(near) + 1) // 2)
+            if lb > 1:
+                m.add(sz[x] >= lb)
     for r in range(n):
         m.add(sz[r] == sum(b[i, r] for i in range(r, n))).OnlyEnforceIf(b[r, r])
     for (i, j) in edges:
@@ -170,6 +188,22 @@ def solve(N, clues, maxd=400, cuts=None, exclude=None, verbose=False, workers=8,
         m.add(tvar[i] == sum(gi * v for gi, v in opts))
     for (i, j) in edges:
         m.add(tvar[i] == tvar[j]).OnlyEnforceIf(same[i, j])
+    if min_max_size:
+        # require some state of at least min_max_size cells (use only a proven lower bound, or it's a
+        # restriction like max_size). Its root has that many cells at or after it, and its transform
+        # needs at least that many cells with in-grid images
+        M = min_max_size
+        dom_size = [sum(x is not None for x in img) for img in images]
+        big = []
+        for r in range(n - M + 1):
+            v = m.new_bool_var(f'big{r}')
+            m.add_implication(v, b[r, r])
+            m.add(sz[r] >= M).OnlyEnforceIf(v)
+            for gi in range(len(G)):
+                if (r, gi) in T and dom_size[gi] < M:
+                    m.add_implication(v, T[r, gi].Not())
+            big.append(v)
+        m.add_bool_or(big)
     t = stage(m, 'symmetry', t)
     # capitols
     eqcache = {}
@@ -323,6 +357,10 @@ if __name__ == '__main__':
     ap.add_argument('--workers', type=int, default=8)
     ap.add_argument('--time', type=int, default=3000, help='time limit per solve, seconds')
     ap.add_argument('--heartbeat', type=int, default=30, help='seconds between progress messages')
+    ap.add_argument('--max-size', type=int, default=None, help='cap state sizes to narrow the search')
+    ap.add_argument('--no-free-r2', action='store_true', help='drop 180-degree rotations that fix no cell to narrow the search')
+    ap.add_argument('--min-max-size', type=int, default=None, help='require some state of at least this size')
+    ap.add_argument('--clue-bounds', action='store_true', help='add size lower bounds derived from the clues')
     ap.add_argument('--logfile', default=None, help='also write the log to this file')
     args = ap.parse_args()
     handlers = [logging.StreamHandler(sys.stdout)]
@@ -343,7 +381,7 @@ if __name__ == '__main__':
                (9,3):10,(10,1):26,(10,5):0,(10,8):77,(10,9):61}
         clues = raw
     try:
-        res = run(N, clues, verbose=args.cpsat_log, workers=args.workers, tlimit=args.time, heartbeat=args.heartbeat)
+        res = run(N, clues, verbose=args.cpsat_log, workers=args.workers, tlimit=args.time, heartbeat=args.heartbeat, max_size=args.max_size, no_free_r2=args.no_free_r2, min_max_size=args.min_max_size, clue_bounds=args.clue_bounds)
     except TimeoutError as e:
         log.warning('%s', e)
         sys.exit(1)
