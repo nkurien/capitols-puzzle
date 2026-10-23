@@ -70,3 +70,22 @@ def test_4x4_solution_sets_match_reference(clues):
 @pytest.mark.parametrize("clues", SLOW_CASES_4, ids=lambda c: f"{len(c)}clues")
 def test_4x4_solution_sets_match_reference_slow(clues):
     check(4, clues)
+
+
+def test_flags_equivalence_on_3x3():
+    clues = CASES_3[0]
+    ref = R.solutions(3, clues)
+    for flag_kwargs in [
+        dict(tclauses=True, edge_images=True, lab_channel=True, eq_channel=True, clue_cuts=True),
+        dict(tclauses=False, edge_images=False, lab_channel=False, eq_channel=False, clue_cuts=False),
+    ]:
+        seen = []
+        found = set()
+        while True:
+            res = S.run(3, clues, workers=1, tlimit=30, exclude=seen, **flag_kwargs)
+            if res is None:
+                break
+            L, caps, D, states = res
+            seen.append(L)
+            found.add(frozenset(frozenset(c) for c in states.values()))
+        assert found == set(ref)
