@@ -12,6 +12,7 @@ The 'small' profile (default) only makes states of up to ~14 cells. The 'big' pr
 states of 15-40 cells and uses fewer clues, which is closer to the real 11x11 puzzle (clue 77 sits
 three steps from a capitol, forcing a state of 26+ cells).
 """
+
 import argparse
 import ast
 import concurrent.futures
@@ -41,9 +42,16 @@ def grow(u, target, free, G, N, rnd, tries=30):
         else:
             continue
         while len(state) < target:
-            options = [x for s in state for x in R.neighbours(s, N)
-                       if x in free and x not in state and g(*x) in free
-                       and 0 <= g(*x)[0] < N and 0 <= g(*x)[1] < N]
+            options = [
+                x
+                for s in state
+                for x in R.neighbours(s, N)
+                if x in free
+                and x not in state
+                and g(*x) in free
+                and 0 <= g(*x)[0] < N
+                and 0 <= g(*x)[1] < N
+            ]
             if not options:
                 break
             x = rnd.choice(options)
@@ -53,19 +61,23 @@ def grow(u, target, free, G, N, rnd, tries=30):
     return best
 
 
-def random_partition(N, rnd, profile='small'):
+def random_partition(N, rnd, profile="small"):
     """Random partition of the grid into symmetric connected states (singletons fill any gaps)."""
-    G = [g for g in S.transforms(N) if g[0] != 'R4']
+    G = [g for g in S.transforms(N) if g[0] != "R4"]
     cells = [(r, c) for r in range(N) for c in range(N)]
     free = set(cells)
     part = []
-    if profile == 'big':
+    if profile == "big":
         b_min = min(BIG_MIN, max(5, N * N // 4))
         b_max = max(b_min, min(BIG_MAX, N * N // 2))
         for _ in range(rnd.randint(1, 3)):
             target = rnd.randint(b_min, b_max)
-            for _ in range(20):  # a big state needs a good seed cell and transform; retry a few
-                state = grow(rnd.choice(sorted(free)), target, free, G, N, rnd, tries=60)
+            for _ in range(
+                20
+            ):  # a big state needs a good seed cell and transform; retry a few
+                state = grow(
+                    rnd.choice(sorted(free)), target, free, G, N, rnd, tries=60
+                )
                 if len(state) >= b_min:
                     part.append(state)
                     free -= state
@@ -85,7 +97,7 @@ def capitol_of(state, N):
     return info[1]
 
 
-def make_instance(N, seed, density=0.35, profile='small'):
+def make_instance(N, seed, density=0.35, profile="small"):
     rnd = random.Random(seed)
     b_min = min(BIG_MIN, max(5, N * N // 4))
     while True:
@@ -93,7 +105,7 @@ def make_instance(N, seed, density=0.35, profile='small'):
         dist = R.distances(part, N, lambda s: capitol_of(s, N))
         if dist is None or len(part) < N or len(part) > N * N // 2:
             continue  # want a few capitols and a few states, not a sea of singletons
-        if profile == 'big' and max(len(s) for s in part) < b_min:
+        if profile == "big" and max(len(s) for s in part) < b_min:
             continue
         cells = sorted(dist)
         k = max(4, round(density * N * N))
@@ -106,12 +118,16 @@ def verify(N, clues, res):
     """Independent check of a solver result against the reference rules."""
     _, caps, _, states = res
     part = [frozenset(cells) for cells in states.values()]
-    assert sorted(x for s in part for x in s) == [(r, c) for r in range(N) for c in range(N)]
+    assert sorted(x for s in part for x in s) == [
+        (r, c) for r in range(N) for c in range(N)
+    ]
     assert all(capitol_of(s, N) is None or capitol_of(s, N) in caps for s in part)
     dist = R.distances(part, N, lambda s: capitol_of(s, N))
     assert dist is not None
     for cell, want in clues.items():
-        assert dist[cell] == want, f"clue {cell}={want} but reference distance is {dist[cell]}"
+        assert dist[cell] == want, (
+            f"clue {cell}={want} but reference distance is {dist[cell]}"
+        )
 
 
 def run_one(job):
@@ -122,17 +138,17 @@ def run_one(job):
         res = S.run(N, clues, workers=workers, tlimit=tlimit, **opts)
         if res:
             verify(N, clues, res)
-            status = 'solved'
+            status = "solved"
         else:
-            status = 'INFEASIBLE (bug: a solution exists)'
+            status = "INFEASIBLE (bug: a solution exists)"
     except TimeoutError:
-        status = 'timeout'
+        status = "timeout"
     return N, seed, len(clues), time.time() - t, status
 
 
 def parse_opt(s):
     """'key=value' -> (key, python literal value); bare words stay strings."""
-    key, _, raw = s.partition('=')
+    key, _, raw = s.partition("=")
     try:
         return key, ast.literal_eval(raw)
     except (ValueError, SyntaxError):
@@ -141,38 +157,71 @@ def parse_opt(s):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('-n', type=int, nargs='+', default=[6, 7, 8])
-    ap.add_argument('--seeds', type=int, default=5)
-    ap.add_argument('--first-seed', type=int, default=0)
-    ap.add_argument('--repeat', type=int, default=1, help='solve each instance this many times')
-    ap.add_argument('--time', type=int, default=60, help='time limit per instance, seconds')
-    ap.add_argument('--workers', type=int, default=8, help='CP-SAT threads per instance')
-    ap.add_argument('--jobs', type=int, default=1,
-                    help='instances solved at once; use with --workers 1 for reproducible, parallel timings')
-    ap.add_argument('--profile', choices=['small', 'big'], default='small',
-                    help="'big' seeds 1-3 states of 15-40 cells, like the real puzzle")
-    ap.add_argument('--density', type=float, default=None,
-                    help='fraction of cells given as clues (default 0.35 small, 0.27 big)')
-    ap.add_argument('--opt', action='append', default=[], metavar='KEY=VALUE',
-                    help='extra keyword argument for solve.run, e.g. --opt tclauses=False (repeatable)')
+    ap.add_argument("-n", type=int, nargs="+", default=[6, 7, 8])
+    ap.add_argument("--seeds", type=int, default=5)
+    ap.add_argument("--first-seed", type=int, default=0)
+    ap.add_argument(
+        "--repeat", type=int, default=1, help="solve each instance this many times"
+    )
+    ap.add_argument(
+        "--time", type=int, default=60, help="time limit per instance, seconds"
+    )
+    ap.add_argument(
+        "--workers", type=int, default=8, help="CP-SAT threads per instance"
+    )
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="instances solved at once; use with --workers 1 for reproducible, parallel timings",
+    )
+    ap.add_argument(
+        "--profile",
+        choices=["small", "big"],
+        default="small",
+        help="'big' seeds 1-3 states of 15-40 cells, like the real puzzle",
+    )
+    ap.add_argument(
+        "--density",
+        type=float,
+        default=None,
+        help="fraction of cells given as clues (default 0.35 small, 0.27 big)",
+    )
+    ap.add_argument(
+        "--opt",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="extra keyword argument for solve.run, e.g. --opt tclauses=False (repeatable)",
+    )
     args = ap.parse_args()
-    density = args.density if args.density is not None else (0.27 if args.profile == 'big' else 0.35)
+    density = (
+        args.density
+        if args.density is not None
+        else (0.27 if args.profile == "big" else 0.35)
+    )
     opts = dict(parse_opt(s) for s in args.opt)
-    print(f'profile={args.profile} density={density} opts={opts}', flush=True)
-    jobs = [(N, seed, density, args.profile, args.workers, args.time, opts)
-            for N in args.n
-            for seed, _ in itertools.product(range(args.first_seed, args.first_seed + args.seeds), range(args.repeat))]
+    print(f"profile={args.profile} density={density} opts={opts}", flush=True)
+    jobs = [
+        (N, seed, density, args.profile, args.workers, args.time, opts)
+        for N in args.n
+        for seed, _ in itertools.product(
+            range(args.first_seed, args.first_seed + args.seeds), range(args.repeat)
+        )
+    ]
     total = timeouts = 0
     times = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.jobs) as pool:
         for N, seed, k, dt, status in pool.map(run_one, jobs):
             total += dt
-            timeouts += status == 'timeout'
+            timeouts += status == "timeout"
             times.append(dt)
-            print(f'N={N} seed={seed} clues={k:3d}  {dt:6.1f}s  {status}', flush=True)
-    print(f'total {total:.1f}s  solved {len(jobs) - timeouts}/{len(jobs)}  '
-          f'median {statistics.median(times):.1f}s  ({timeouts} timeouts)')
+            print(f"N={N} seed={seed} clues={k:3d}  {dt:6.1f}s  {status}", flush=True)
+    print(
+        f"total {total:.1f}s  solved {len(jobs) - timeouts}/{len(jobs)}  "
+        f"median {statistics.median(times):.1f}s  ({timeouts} timeouts)"
+    )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -3,12 +3,21 @@
 Deliberately independent of solve.py (no shared transform tables) so it can cross-check the
 CP-SAT model on tiny grids by enumerating every valid partition outright.
 """
+
 import functools
 import heapq
 
 # linear parts of the 8 lattice isometries preserving the square grid: (r, c) -> (a*r + b*c, c_*r + d*c)
-LINEAR = [(1, 0, 0, 1), (0, -1, 1, 0), (-1, 0, 0, -1), (0, 1, -1, 0),
-          (-1, 0, 0, 1), (1, 0, 0, -1), (0, 1, 1, 0), (0, -1, -1, 0)]
+LINEAR = [
+    (1, 0, 0, 1),
+    (0, -1, 1, 0),
+    (-1, 0, 0, -1),
+    (0, 1, -1, 0),
+    (-1, 0, 0, 1),
+    (1, 0, 0, -1),
+    (0, 1, 1, 0),
+    (0, -1, -1, 0),
+]
 IDENTITY = (1, 0, 0, 1)
 
 
@@ -116,7 +125,9 @@ def solutions(N, clues):
 
     def ok(S):
         cap = states[S]
-        return all(states[S] == x for x in must_cap & S) and not (cap is not None and cap in not_cap)
+        return all(states[S] == x for x in must_cap & S) and not (
+            cap is not None and cap in not_cap
+        )
 
     def rec(covered, chosen):
         free = next((x for x in cells if x not in covered), None)
@@ -124,7 +135,10 @@ def solutions(N, clues):
             part = frozenset(chosen)
             dist = distances(part, N, states.__getitem__)
             if dist is not None and all(dist[x] == d for x, d in clues.items()):
-                out[part] = (frozenset(states[S] for S in part if states[S] is not None), dist)
+                out[part] = (
+                    frozenset(states[S] for S in part if states[S] is not None),
+                    dist,
+                )
             return
         for S in by_min[free]:
             if not (S & covered) and ok(S):

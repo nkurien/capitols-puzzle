@@ -1,4 +1,5 @@
 """End-to-end check of the 5x5 example, validated independently of the CP-SAT model."""
+
 import heapq
 
 import pytest
@@ -6,7 +7,18 @@ import pytest
 import solve as S
 
 N = 5
-CLUES = {(0,0):12,(0,4):17,(1,0):8,(1,2):6,(1,3):3,(3,1):7,(3,2):6,(3,4):10,(4,0):25,(4,4):0}
+CLUES = {
+    (0, 0): 12,
+    (0, 4): 17,
+    (1, 0): 8,
+    (1, 2): 6,
+    (1, 3): 3,
+    (3, 1): 7,
+    (3, 2): 6,
+    (3, 4): 10,
+    (4, 0): 25,
+    (4, 4): 0,
+}
 
 
 @pytest.fixture(scope="module")
@@ -84,5 +96,5 @@ def test_clues_are_met_by_independent_dijkstra(result):
 def test_known_answer(result):
     L, _, _, states = result
     sizes = [len(states[L[i]]) for i in range(N * N)]
-    rows = [sum(sizes[r * N:(r + 1) * N]) for r in range(N)]
+    rows = [sum(sizes[r * N : (r + 1) * N]) for r in range(N)]
     assert sum(x * x for x in rows) == 8045

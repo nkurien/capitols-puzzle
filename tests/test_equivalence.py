@@ -4,6 +4,7 @@ reference accepts (same capitols, same distances), not just find *a* valid one.
 Any model change that silently loses (or invents) a solution fails here. Run the slower 4x4 cases
 with `pytest -m slow`.
 """
+
 import pytest
 import reference as R
 
@@ -38,7 +39,10 @@ SLOW_CASES_4 = [
     {(0, 2): 5, (1, 1): 3, (2, 0): 0, (2, 2): 0, (3, 1): 1, (3, 2): 3},
     {(0, 0): 0, (1, 2): 5, (1, 3): 3, (3, 3): 4},
 ]
-UNSAT_3 = {(0, 0): 0, (0, 1): 7}   # a 3x3 grid cannot cost 7 to reach a capitol from the cell next to one
+UNSAT_3 = {
+    (0, 0): 0,
+    (0, 1): 7,
+}  # a 3x3 grid cannot cost 7 to reach a capitol from the cell next to one
 
 
 def check(N, clues, expect_solutions=True):
@@ -46,7 +50,8 @@ def check(N, clues, expect_solutions=True):
     assert bool(ref) == expect_solutions, "test case is not what it claims to be"
     got = cp_solutions(N, clues)
     assert set(got) == set(ref), (
-        f"{len(set(ref) - set(got))} partition(s) lost, {len(set(got) - set(ref))} invented")
+        f"{len(set(ref) - set(got))} partition(s) lost, {len(set(got) - set(ref))} invented"
+    )
     for part, (caps, dist) in ref.items():
         assert got[part][0] == caps, "capitols differ"
         assert got[part][1] == dist, "distances differ"
@@ -76,8 +81,20 @@ def test_flags_equivalence_on_3x3():
     clues = CASES_3[0]
     ref = R.solutions(3, clues)
     for flag_kwargs in [
-        dict(tclauses=True, edge_images=True, lab_channel=True, eq_channel=True, clue_cuts=True),
-        dict(tclauses=False, edge_images=False, lab_channel=False, eq_channel=False, clue_cuts=False),
+        {
+            "tclauses": True,
+            "edge_images": True,
+            "lab_channel": True,
+            "eq_channel": True,
+            "clue_cuts": True,
+        },
+        {
+            "tclauses": False,
+            "edge_images": False,
+            "lab_channel": False,
+            "eq_channel": False,
+            "clue_cuts": False,
+        },
     ]:
         seen = []
         found = set()
@@ -85,7 +102,7 @@ def test_flags_equivalence_on_3x3():
             res = S.run(3, clues, workers=1, tlimit=30, exclude=seen, **flag_kwargs)
             if res is None:
                 break
-            L, caps, D, states = res
+            L, _caps, _D, states = res
             seen.append(L)
             found.add(frozenset(frozenset(c) for c in states.values()))
         assert found == set(ref)
