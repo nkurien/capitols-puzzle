@@ -1,4 +1,5 @@
 import argparse
+import heapq
 import logging
 import sys
 import threading
@@ -131,6 +132,7 @@ def solve(
     heartbeat=30,
     max_size=None,
     no_free_r2=False,
+    require_free_r2=False,
     min_max_size=None,
     clue_bounds=False,
     tclauses=True,
@@ -140,6 +142,7 @@ def solve(
     clue_cuts=True,
     sound_distance_bounds=True,
     big_first=False,
+    lin_level=None,
 ):
     cuts = cuts or []
     exclude = exclude or []
@@ -180,7 +183,6 @@ def solve(
         n_before,
     )
     fixed_at = [[i for i in range(n) if img[i] == i] for img in images]
-    m = cp_model.CpModel()
 
     def nbrs(i):
         r, c = cells[i]
@@ -188,19 +190,231 @@ def solve(
             if (r + dr, c + dc) in idx:
                 yield idx[(r + dr, c + dc)]
 
+    adj = [list(nbrs(i)) for i in range(n)]
+
+    # Compile-time domain tightening of (sz_lb, sz_ub, d_lb, d_ub, cap_possible)
+    step_cap = max_size or n
+    sz_lb = [1] * n
+    sz_ub = [step_cap] * n
+    d_lb = [0] * n
+    d_ub = [maxd] * n
+    cap_possible = [True] * n
+
+    for i in range(n):
+        if sound_distance_bounds and clues:
+            r, c = cells[i]
+            d_lb[i] = max(
+                [0]
+                + [
+                    v - step_cap * (abs(r - cr) + abs(c - cc))
+                    for (cr, cc), v in clues.items()
+                ]
+            )
+            d_ub[i] = min(
+                [maxd]
+                + [
+                    v + step_cap * (abs(r - cr) + abs(c - cc))
+                    for (cr, cc), v in clues.items()
+                ]
+            )
+        if cells[i] in clues:
+            v = clues[cells[i]]
+            d_lb[i] = d_ub[i] = v
+            if v > 0:
+                cap_possible[i] = False
+                if clue_cuts or clue_bounds:
+                    sz_lb[i] = 2
+
+    if (clue_cuts or clue_bounds) and clues:
+        cv = {idx[x]: v for x, v in clues.items()}
+        for x in range(n):
+            near = [cv[u] for u in adj[x] if u in cv]
+            lb = 2 if any(v >= 2 for v in near) else 1
+            if near:
+                lb = max(lb, (max(near) - min(near) + 1) // 2)
+            sz_lb[x] = max(sz_lb[x], lb)
+        if clue_cuts:
+            for _ in range(8):
+                changed = False
+                for i in range(n):
+                    if d_lb[i] > 0 and cap_possible[i]:
+                        cap_possible[i] = False
+                        changed = True
+                    if not cap_possible[i] and d_lb[i] < 1:
+                        d_lb[i] = 1
+                        changed = True
+                    if not cap_possible[i] and sz_lb[i] < 2:
+                        sz_lb[i] = 2
+                        changed = True
+                    if sz_lb[i] == 1 and any(d_lb[nb] >= 2 for nb in adj[i]):
+                        sz_lb[i] = 2
+                        changed = True
+                    if sz_ub[i] == 1:
+                        if d_ub[i] > 0:
+                            d_ub[i] = 0
+                            changed = True
+                        for nb in adj[i]:
+                            if d_ub[nb] > 1:
+                                d_ub[nb] = 1
+                                changed = True
+                for i in range(n):
+                    if d_lb[i] == 1 and d_ub[i] == 1 and sz_lb[i] >= 2:
+                        sing_cands = [
+                            nb for nb in adj[i] if sz_lb[nb] == 1 and cap_possible[nb]
+                        ]
+                        if len(sing_cands) == 1:
+                            s = sing_cands[0]
+                            if sz_ub[s] > 1:
+                                sz_ub[s] = 1
+                                d_ub[s] = 0
+                                changed = True
+                for i in range(n):
+                    for j in adj[i]:
+                        if sound_distance_bounds:
+                            w_ub = min(sz_ub[i], sz_ub[j])
+                            if d_ub[i] > d_ub[j] + w_ub:
+                                d_ub[i] = d_ub[j] + w_ub
+                                changed = True
+                        req = d_lb[i] - d_ub[j]
+                        if req > sz_lb[i]:
+                            sz_lb[i] = req
+                            changed = True
+                        if req > sz_lb[j]:
+                            sz_lb[j] = req
+                            changed = True
+                    if sound_distance_bounds and not cap_possible[i]:
+                        min_inc = min(d_lb[j] + min(sz_lb[i], sz_lb[j]) for j in adj[i])
+                        if min_inc > d_lb[i]:
+                            d_lb[i] = min_inc
+                            changed = True
+                for m_cell in range(n):
+                    for a in adj[m_cell]:
+                        for b_nb in adj[m_cell]:
+                            if a != b_nb:
+                                req = (d_lb[a] - d_ub[b_nb] + 1) // 2
+                                if req > sz_lb[m_cell]:
+                                    sz_lb[m_cell] = req
+                                    changed = True
+                if not changed:
+                    break
+
+    def max_region(seed, gi, forbid_other_fixed=False):
+        img = images[gi]
+        if img[seed] is None:
+            return set()
+        forbid = set()
+        if forbid_other_fixed:
+            for f in fixed_at[gi]:
+                if f != seed:
+                    forbid.add(f)
+        if len(fixed_at[gi]) == 1:
+            f = fixed_at[gi][0]
+            if not cap_possible[f]:
+                forbid.add(f)
+        valid = set()
+        for u in range(n):
+            v = img[u]
+            if v is None or u in forbid or v in forbid:
+                continue
+            if u != seed and (sz_ub[u] < sz_lb[seed] or sz_ub[v] < sz_lb[seed]):
+                continue
+            valid.add(u)
+        if seed not in valid:
+            return set()
+        while True:
+            comp = {seed}
+            queue = [seed]
+            while queue:
+                curr = queue.pop()
+                for nb in adj[curr]:
+                    if nb in valid and nb not in comp:
+                        comp.add(nb)
+                        queue.append(nb)
+            new_valid = {u for u in comp if img[u] in comp}
+            if len(new_valid) == len(valid):
+                return new_valid
+            valid = new_valid
+            if seed not in valid:
+                return set()
+
+    def valid_region_from_root(r, gi):
+        img = images[gi]
+        if img[r] is None or img[r] < r:
+            return set()
+        forbid = set()
+        if len(fixed_at[gi]) == 1:
+            f = fixed_at[gi][0]
+            if not cap_possible[f]:
+                forbid.add(f)
+        valid = set()
+        for u in range(r, n):
+            v = img[u]
+            if v is None or v < r or u in forbid or v in forbid:
+                continue
+            if u != r and (sz_ub[u] < sz_lb[r] or sz_ub[v] < sz_lb[r]):
+                continue
+            valid.add(u)
+        if r not in valid:
+            return set()
+        while True:
+            comp = {r}
+            queue = [r]
+            while queue:
+                curr = queue.pop()
+                for nb in adj[curr]:
+                    if nb in valid and nb not in comp:
+                        comp.add(nb)
+                        queue.append(nb)
+            new_valid = {u for u in comp if img[u] in comp}
+            if len(new_valid) == len(valid):
+                return new_valid
+            valid = new_valid
+            if r not in valid:
+                return set()
+
+    root_gi_regions = {}
+    root_gi_max_s = {}
+    possible_b = set()
+    for r in range(n):
+        for gi in range(len(G)):
+            reg = valid_region_from_root(r, gi)
+            if not reg:
+                continue
+            max_s = len(reg)
+            if (
+                len(fixed_at[gi]) == 0
+                or (len(fixed_at[gi]) == 1 and fixed_at[gi][0] not in reg)
+            ) and max_s % 2 == 1:
+                max_s -= 1
+            if max_s < sz_lb[r]:
+                continue
+            root_gi_regions[r, gi] = reg
+            root_gi_max_s[r, gi] = max_s
+            for j in reg:
+                req = max(sz_lb[r], sz_lb[j], 2 if j > r else 1)
+                if max_s >= req and sz_ub[j] >= sz_lb[r] and sz_ub[r] >= sz_lb[j]:
+                    possible_b.add((j, r))
+
+    m = cp_model.CpModel()
+    for i in range(n):
+        if sz_lb[i] > sz_ub[i] or d_lb[i] > d_ub[i]:
+            m.add_bool_or([])
+
     lab = [m.new_int_var(0, i, f"lab{i}") for i in range(n)]
     b = {}
     for i in range(n):
         bs = []
         for r in range(i + 1):
             b[i, r] = m.new_bool_var("")
+            if (i, r) not in possible_b:
+                m.add(b[i, r] == 0)
             bs.append(b[i, r])
         m.add_exactly_one(bs)
         m.add(lab[i] == sum(r * b[i, r] for r in range(i + 1)))
         for r in range(i):
             m.add_implication(b[i, r], b[r, r])
     t = stage(m, "labels", t_build)
-    edges = [(i, j) for i in range(n) for j in nbrs(i) if i < j]
+    edges = [(i, j) for i in range(n) for j in adj[i] if i < j]
     same = {}
     for i, j in edges:
         s = m.new_bool_var("")
@@ -222,7 +436,7 @@ def solve(
         m.add(h[i] == 0).OnlyEnforceIf(b[i, i])
         m.add(h[i] >= 1).OnlyEnforceIf(b[i, i].Not())
         par = []
-        for j in nbrs(i):
+        for j in adj[i]:
             p = m.new_bool_var("")
             m.add_implication(p, same[i, j])
             m.add(h[j] < h[i]).OnlyEnforceIf(p)
@@ -232,60 +446,58 @@ def solve(
     # sizes: counted at the state's root, then carried to every cell along same-state edges
     # (states are connected, so each cell reaches its root through such edges)
     # max_size caps every state's size: any solution found is still genuine, it only narrows the search
-    sz = [m.new_int_var(1, max_size or n, "") for i in range(n)]
+    sz = [m.new_int_var(sz_lb[i], max(sz_lb[i], sz_ub[i]), "") for i in range(n)]
     is_sing = [m.new_bool_var(f"sing{i}") for i in range(n)]
     for i in range(n):
         m.add(sz[i] == 1).OnlyEnforceIf(is_sing[i])
         m.add(sz[i] >= 2).OnlyEnforceIf(is_sing[i].Not())
         m.add_implication(is_sing[i], b[i, i])
-        for j in nbrs(i):
-            m.add_implication(is_sing[i], same[min(i, j), max(i, j)].Not())
-    if clue_cuts or clue_bounds:
-        # size lower bounds read straight off the clues (presolve doesn't find them, as the edge weights
-        # start with upper bound n). A cell between neighbours u and v is crossed by a two-edge route
-        # costing at most twice its size, so 2*sz >= |d_u - d_v|; a singleton is a capitol, so all its
-        # neighbours are within distance 1, and a cell next to a clue of 2 or more is not one
-        cv = {idx[x]: v for x, v in clues.items()}
-        for x in range(n):
-            near = [cv[u] for u in nbrs(x) if u in cv]
-            lb = 2 if any(v >= 2 for v in near) else 1
-            if near:
-                lb = max(lb, (max(near) - min(near) + 1) // 2)
-            if lb > 1:
-                m.add(sz[x] >= lb)
-        if clue_cuts:
-            # 1. Adjacent clues: sz[c1] >= gap, sz[c2] >= gap
-            for (r, c), v in clues.items():
-                for dr, dc in ((1, 0), (0, 1)):
-                    if (r + dr, c + dc) in clues:
-                        gap = abs(v - clues[(r + dr, c + dc)])
-                        if gap > 1:
-                            m.add(sz[idx[(r, c)]] >= gap)
-                            m.add(sz[idx[(r + dr, c + dc)]] >= gap)
+        for j in adj[i]:
+            m.add_implication(is_sing[i], same[i, j].Not())
+        m.add_bool_or([is_sing[i]] + [same[i, j] for j in adj[i]])
+    if clue_cuts:
+        # Cached threshold literals for sz[j] >= k to avoid duplicate anonymous variables across paths
+        sz_ge_cache = {}
 
-            # 2. Monotone paths of length 2 to 6 between clues:
-            clue_list = list(clues.items())
-            for idx_a in range(len(clue_list)):
-                c1, v1 = clue_list[idx_a]
-                for idx_b in range(idx_a + 1, len(clue_list)):
-                    c2, v2 = clue_list[idx_b]
-                    dist = abs(c1[0] - c2[0]) + abs(c1[1] - c2[1])
-                    gap = abs(v1 - v2)
-                    if 2 <= dist <= 6 and gap > 1:
-                        sum_sz = (gap + 1) // 2
-                        min_max_sz = (gap + dist - 1) // dist
-                        for path in monotone_paths(c1, c2):
-                            mid_cells = [idx[step[1]] for step in path[:-1]]
-                            if sum_sz > 1:
-                                m.add(sum(sz[j] for j in mid_cells) >= sum_sz)
-                            if min_max_sz > 1:
-                                if len(mid_cells) == 1:
-                                    m.add(sz[mid_cells[0]] >= min_max_sz)
-                                else:
-                                    bools = [m.new_bool_var("") for _ in mid_cells]
-                                    for j, b_j in zip(mid_cells, bools):
-                                        m.add(sz[j] >= min_max_sz).OnlyEnforceIf(b_j)
-                                    m.add_bool_or(bools)
+        def sz_ge(j, k):
+            if (j, k) not in sz_ge_cache:
+                bv = m.new_bool_var("")
+                m.add(sz[j] >= k).OnlyEnforceIf(bv)
+                m.add(sz[j] <= k - 1).OnlyEnforceIf(bv.Not())
+                sz_ge_cache[j, k] = bv
+            return sz_ge_cache[j, k]
+
+        # Monotone paths of length 2 to 6 between clues:
+        clue_list = list(clues.items())
+        for idx_a in range(len(clue_list)):
+            c1, v1 = clue_list[idx_a]
+            for idx_b in range(idx_a + 1, len(clue_list)):
+                c2, v2 = clue_list[idx_b]
+                dist = abs(c1[0] - c2[0]) + abs(c1[1] - c2[1])
+                gap = abs(v1 - v2)
+                if 2 <= dist <= 6 and gap > 1:
+                    u0, uk = idx[c1], idx[c2]
+                    if dist == 2 and sz_lb[u0] + sz_lb[uk] < gap:
+                        m.add(sz[u0] + sz[uk] >= gap)
+                    sum_sz = (gap + 1) // 2
+                    min_max_sz = (gap + dist - 1) // dist
+                    for path in monotone_paths(c1, c2):
+                        mid_cells = [idx[step[1]] for step in path[:-1]]
+                        if dist == 2:
+                            u1 = mid_cells[0]
+                            if sz_lb[u0] + sz_lb[u1] < gap:
+                                m.add(sz[u0] + sz[u1] >= gap)
+                            if sz_lb[u1] + sz_lb[uk] < gap:
+                                m.add(sz[u1] + sz[uk] >= gap)
+                        if sum_sz > 1 and sum(sz_lb[j] for j in mid_cells) < sum_sz:
+                            m.add(sum(sz[j] for j in mid_cells) >= sum_sz)
+                        if min_max_sz > 1 and all(
+                            sz_lb[j] < min_max_sz for j in mid_cells
+                        ):
+                            if len(mid_cells) == 1:
+                                m.add(sz[mid_cells[0]] >= min_max_sz)
+                            else:
+                                m.add_bool_or([sz_ge(j, min_max_sz) for j in mid_cells])
     for r in range(n):
         m.add(sz[r] == sum(b[i, r] for i in range(r, n))).OnlyEnforceIf(b[r, r])
     for i, j in edges:
@@ -301,6 +513,14 @@ def solve(
             if j is None or i > j:
                 continue
             assert img[j] == i
+            best_s = 0
+            for r in range(i + 1):
+                reg = root_gi_regions.get((r, gi))
+                if reg and i in reg and j in reg:
+                    ms = root_gi_max_s[r, gi]
+                    best_s = max(best_s, ms)
+            if best_s < max(sz_lb[i], sz_lb[j], 2 if i < j else 1):
+                continue
             v = m.new_bool_var("")
             T[i, gi] = T[j, gi] = v
             if i < j:
@@ -344,10 +564,10 @@ def solve(
                     continue
                 var_t = T[i, gi]
                 t_id = id(var_t)
-                for j in nbrs(i):
+                for j in adj[i]:
                     v = img[j]
-                    if v is None:
-                        m.add_bool_or([var_t.Not(), same[min(i, j), max(i, j)].Not()])
+                    if v is None or (j, gi) not in T:
+                        m.add_bool_or([var_t.Not(), same[i, j].Not()])
                     else:
                         e1 = (min(i, j), max(i, j))
                         e2 = (min(u, v), max(u, v))
@@ -357,19 +577,33 @@ def solve(
                                 seen_clauses.add(key)
                                 m.add_bool_or([var_t.Not(), same[e1].Not(), same[e2]])
                                 m.add_bool_or([var_t.Not(), same[e1], same[e2].Not()])
+    if require_free_r2:
+        free_r2_vars = {
+            T[i, gi]
+            for gi, g in enumerate(G)
+            if g[0] == "R2" and not fixed_at[gi]
+            for i in range(n)
+            if (i, gi) in T
+        }
+        m.add_bool_or(list(free_r2_vars))
     if min_max_size:
         # require some state of at least min_max_size cells (use only a proven lower bound, or it's a
         # restriction like max_size). Its root has that many cells at or after it, and its transform
-        # needs at least that many cells with in-grid images
+        # needs at least that many cells in its valid root-region
         M = min_max_size
-        dom_size = [sum(x is not None for x in img) for img in images]
         big = []
         for r in range(n - M + 1):
+            if not any(
+                root_gi_max_s.get((r, gi), 0) >= M
+                for gi in range(len(G))
+                if (r, gi) in T
+            ):
+                continue
             v = m.new_bool_var(f"big{r}")
             m.add_implication(v, b[r, r])
             m.add(sz[r] >= M).OnlyEnforceIf(v)
             for gi in range(len(G)):
-                if (r, gi) in T and dom_size[gi] < M:
+                if (r, gi) in T and root_gi_max_s.get((r, gi), 0) < M:
                     m.add_implication(v, T[r, gi].Not())
             big.append(v)
         m.add_bool_or(big)
@@ -382,12 +616,12 @@ def solve(
             return same[i, j]
         key = (min(i, j), max(i, j))
         if key not in eqcache:
+            u, v = key
             s = m.new_bool_var("")
             if not eq_channel:
-                m.add(lab[i] == lab[j]).OnlyEnforceIf(s)
-                m.add(lab[i] != lab[j]).OnlyEnforceIf(s.Not())
+                m.add(lab[u] == lab[v]).OnlyEnforceIf(s)
+                m.add(lab[u] != lab[v]).OnlyEnforceIf(s.Not())
             else:
-                u, v = key
                 for r in range(u + 1):
                     m.add_bool_or([s.Not(), b[u, r].Not(), b[v, r]])
                     m.add_bool_or([s.Not(), b[v, r].Not(), b[u, r]])
@@ -398,17 +632,34 @@ def solve(
         return eqcache[key]
 
     cap = [m.new_bool_var(f"cap{i}") for i in range(n)]
-    for (r, c), v in clues.items():
-        # a clue of 0 sits on a capitol; any positive clue does not
-        m.add(cap[idx[(r, c)]] == (1 if v == 0 else 0))
+    for i in range(n):
+        if not cap_possible[i]:
+            m.add(cap[i] == 0)
+        elif d_ub[i] == 0:
+            m.add(cap[i] == 1)
     for i in range(n):
         m.add_implication(is_sing[i], cap[i])
     for i in range(n):
         ors = []
+        c_sz_lb = (
+            max([sz_lb[i]] + [d_lb[nb] for nb in adj[i]]) if clue_cuts else sz_lb[i]
+        )
+        if c_sz_lb % 2 == 0:
+            c_sz_lb += 1
         for gi, img in enumerate(images):
-            if img[i] != i:  # only transforms that fix this cell can make it a capitol
+            if (
+                img[i] != i or (i, gi) not in T
+            ):  # only transforms that fix this cell can make it a capitol
                 continue
+            r_cap = max_region(i, gi, forbid_other_fixed=True)
+            cap_ub = len(r_cap) if len(r_cap) % 2 == 1 else len(r_cap) - 1
             others = [j for j in fixed_at[gi] if j != i]
+            if not cap_possible[i] or cap_ub < c_sz_lb:
+                if not others:
+                    m.add(T[i, gi] == 0)
+                else:
+                    m.add_bool_or([T[i, gi].Not()] + [eq(i, j) for j in others])
+                continue
             if not others:  # nothing else to be in the same state as: T itself says i is the capitol
                 ors.append(T[i, gi])
                 continue
@@ -422,6 +673,8 @@ def solve(
         m.add_bool_or(ors).OnlyEnforceIf(cap[i])
         for a in ors:
             m.add_implication(a, cap[i])
+        if not ors:
+            m.add(cap[i] == 0)
     # A capitol's state is mapped to itself by an involution (reflection or R2) that fixes only the
     # capitol, so the remaining cells pair up and the state size is odd. Implied, but it links the
     # capitol and size variables directly for propagation.
@@ -430,53 +683,33 @@ def solve(
         m.add(sz[i] == 2 * half[i] + 1).OnlyEnforceIf(cap[i])
         # a one-cell state is symmetric about itself and so is always its own capitol
         m.add(sz[i] >= 2).OnlyEnforceIf(cap[i].Not())
+        if clue_cuts and cap_possible[i]:
+            c_sz_lb = max([sz_lb[i]] + [d_lb[nb] for nb in adj[i]])
+            if c_sz_lb % 2 == 0:
+                c_sz_lb += 1
+            if c_sz_lb > sz_lb[i]:
+                m.add(sz[i] >= c_sz_lb).OnlyEnforceIf(cap[i])
+            for nb in adj[i]:
+                if d_lb[nb] > sz_lb[nb]:
+                    m.add(sz[nb] >= d_lb[nb]).OnlyEnforceIf(cap[i])
     t = stage(m, "capitols", t)
     # distances
-    step_cap = max_size or n
-    d = []
-    d_lb = []
-    d_ub = []
-    for i in range(n):
-        if sound_distance_bounds and clues:
-            r, c = cells[i]
-            lb_i = max(
-                [0]
-                + [
-                    v - step_cap * (abs(r - cr) + abs(c - cc))
-                    for (cr, cc), v in clues.items()
-                ]
-            )
-            ub_i = min(
-                [maxd]
-                + [
-                    v + step_cap * (abs(r - cr) + abs(c - cc))
-                    for (cr, cc), v in clues.items()
-                ]
-            )
-            if (r, c) in clues:
-                lb_i = ub_i = clues[(r, c)]
-            d_lb.append(lb_i)
-            d_ub.append(ub_i)
-            d.append(m.new_int_var(lb_i, ub_i, f"d{i}"))
-        else:
-            lb_i = clues.get(cells[i], 0)
-            ub_i = clues.get(cells[i], maxd)
-            d_lb.append(lb_i)
-            d_ub.append(ub_i)
-            d.append(m.new_int_var(lb_i, ub_i, f"d{i}"))
+    d = [m.new_int_var(d_lb[i], max(d_lb[i], d_ub[i]), f"d{i}") for i in range(n)]
     w = {}
     for i, j in edges:
-        v = m.new_int_var(1, n, "")
+        w_l = min(sz_lb[i], sz_lb[j])
+        w_u = max(w_l, min(sz_ub[i], sz_ub[j]))
+        v = m.new_int_var(w_l, w_u, "")
         m.add_min_equality(v, [sz[i], sz[j]])
         w[i, j] = w[j, i] = v
     for i in range(n):
         m.add(d[i] == 0).OnlyEnforceIf(cap[i])
         m.add(d[i] >= 1).OnlyEnforceIf(cap[i].Not())
-        is_known_cap = clues.get(cells[i]) == 0
+        is_known_cap = d_ub[i] == 0
         par = []
-        for j in nbrs(i):
+        for j in adj[i]:
             m.add(d[i] <= d[j] + w[i, j])
-            if not is_known_cap and d_lb[j] < d_ub[i]:
+            if not is_known_cap and d_lb[j] + min(sz_lb[i], sz_lb[j]) <= d_ub[i]:
                 p = m.new_bool_var("")
                 m.add(d[i] >= d[j] + w[i, j]).OnlyEnforceIf(p)
                 par.append(p)
@@ -486,21 +719,48 @@ def solve(
         m.add(d[idx[(r, c)]] == v)
     if clue_cuts:
         for i in range(n):
-            for j in nbrs(i):
+            for j in adj[i]:
                 m.add(d[j] <= 1).OnlyEnforceIf(is_sing[i])
         for (r, c), v in clues.items():
             if v == 1:
                 x = idx[(r, c)]
-                m.add_bool_or([is_sing[j] for j in nbrs(x)])
+                m.add_bool_or([is_sing[j] for j in adj[x]])
             elif v > 1:
-                # Every path of k steps to a capitol costs >= 2k - 1, so k <= (v + 1) // 2
-                max_steps = (v + 1) // 2
-                reach = [
-                    idx[cand]
-                    for cand in cells
-                    if abs(r - cand[0]) + abs(c - cand[1]) <= max_steps
-                    and clues.get(cand, 0) == 0
-                ]
+                x = idx[(r, c)]
+                reach = []
+                for cand in range(n):
+                    if not cap_possible[cand]:
+                        continue
+                    c_sz = max([sz_lb[cand]] + [d_lb[nb] for nb in adj[cand]])
+                    if c_sz % 2 == 0:
+                        c_sz += 1
+                    if c_sz > sz_ub[cand]:
+                        continue
+                    dist = [10**9] * n
+                    dist[cand] = 0
+                    pq = [(0, cand)]
+                    while pq:
+                        d_u, u = heapq.heappop(pq)
+                        if d_u > dist[u] or d_u > v:
+                            continue
+                        if u == x:
+                            break
+                        sz_u = c_sz if u == cand else max(2, sz_lb[u])
+                        for nb in adj[u]:
+                            if nb == cand:
+                                continue
+                            sz_nb = max(2, sz_lb[nb])
+                            if u == cand:
+                                sz_nb = max(sz_nb, d_lb[nb])
+                            w_lb = min(sz_u, sz_nb)
+                            if d_lb[nb] > v:
+                                continue
+                            eff_nd = max(d_u + w_lb, d_lb[nb])
+                            if eff_nd <= v and eff_nd < dist[nb]:
+                                dist[nb] = eff_nd
+                                heapq.heappush(pq, (eff_nd, nb))
+                    if dist[x] <= v:
+                        reach.append(cand)
                 m.add_bool_or([cap[j] for j in reach])
         clue_list = list(clues.items())
         for idx_a in range(len(clue_list)):
@@ -520,7 +780,7 @@ def solve(
         Sset = set(S)
         bnd = set()
         for x in S:
-            for j in nbrs(idx[x]):
+            for j in adj[idx[x]]:
                 if cells[j] not in Sset and j > rep:
                     bnd.add(j)
         m.add_bool_or(
@@ -544,6 +804,8 @@ def solve(
     solver = cp_model.CpSolver()
     solver.parameters.num_workers = workers
     solver.parameters.max_time_in_seconds = tlimit
+    if lin_level is not None:
+        solver.parameters.linearization_level = lin_level
     solver.parameters.log_search_progress = verbose
     solver.parameters.log_to_stdout = (
         False  # route through log_callback only, else every line prints twice
@@ -670,6 +932,11 @@ if __name__ == "__main__":
         help="drop 180-degree rotations that fix no cell to narrow the search",
     )
     ap.add_argument(
+        "--require-free-r2",
+        action="store_true",
+        help="require at least one state to use a fixed-point-free 180-degree rotation",
+    )
+    ap.add_argument(
         "--min-max-size",
         type=int,
         default=None,
@@ -708,6 +975,12 @@ if __name__ == "__main__":
         "--big-first",
         action="store_true",
         help="branch on size of largest clue cells first",
+    )
+    ap.add_argument(
+        "--lin-level",
+        type=int,
+        default=None,
+        help="CP-SAT linearization_level parameter (e.g. 0 to disable LP relaxation)",
     )
     ap.add_argument("--logfile", default=None, help="also write the log to this file")
     args = ap.parse_args()
@@ -783,6 +1056,7 @@ if __name__ == "__main__":
             heartbeat=args.heartbeat,
             max_size=args.max_size,
             no_free_r2=args.no_free_r2,
+            require_free_r2=args.require_free_r2,
             min_max_size=args.min_max_size,
             clue_bounds=args.clue_bounds,
             tclauses=not args.no_tclauses,
@@ -792,6 +1066,7 @@ if __name__ == "__main__":
             clue_cuts=not args.no_clue_cuts,
             sound_distance_bounds=not args.no_sound_bounds,
             big_first=args.big_first,
+            lin_level=args.lin_level,
         )
     except TimeoutError as e:
         log.warning("%s", e)
