@@ -15,6 +15,47 @@ of the two sizes when crossing a border. A clue gives the cheapest cost from tha
 so a clue of `0` marks a capitol. The answer is the sum over rows of the squared row sum, where each
 cell is labelled with the size of its state (8,045 for the 5×5 example).
 
+## Technical summary
+
+**Result.** The 11×11 puzzle is solved: answer `408951`, 16 states and 8 capitols, found in 1,580s on 8
+cores (default CP-SAT portfolio, `--min-max-size 26 --require-free-r2`) and checked against the
+independent oracle's rules. Uniqueness of the solution was not checked. Full run history, the solution
+grid and all benchmarks are in [`FINDINGS.md`](FINDINGS.md).
+
+**Scale.** The `main` model has about 21k variables and 179k constraints over 441 symmetry transforms
+(746 before reductions). The unmodified model was still `UNKNOWN` after 3,000s.
+
+**What got it there**
+- *Compile-time propagation* (`capitols/propagate.py`, no CP-SAT involved). A fixed-point pass tightens
+  state-size and distance bounds from the clues. It proves cell `(5, 10)` is a singleton capitol before
+  any model exists, and the consequences cascade down the right edge (e.g. `sz ≥ 12` at `(6, 10)`).
+- *Root-region pruning.* Every state has a unique lowest-numbered root `r` and a transform `g`, and every
+  cell and its image must be at or after `r`. Flood-filling that region per `(r, g)` removes 1,302
+  impossible root/transform pairs and almost halves the viable pairs for the size-26 bound
+  (7,990 to 4,558). A cell-centred 180° rotation can never root a state larger than one cell.
+- *A computational theorem, used as a constraint.* Forbidding every fixed-point-free 180° rotation made
+  `main` `INFEASIBLE` in 1,185s, so any solution has a state whose only symmetry is such a rotation
+  (in the answer, the size-12 and size-10 states). `--require-free-r2` adds that as one clause. Size-capped runs
+  likewise proved that some state has at least 36 cells.
+- *Lazy capitol verification.* The model only knows one transform per state, so it can declare a false
+  capitol. Candidates are checked against the full symmetry group and failures become cuts. `main`
+  needed zero cuts.
+- *Clue cuts.* Path inequalities between nearby clues (`Δ ≤ Σ min(sz)` along every shortest path),
+  a non-singleton incident-edge clause, and a lower-bound Dijkstra restricting which cells can be a
+  clue's capitol.
+
+**Measured, including what did not work.** Changes were judged by timing, not by intuition, using a
+fast yardstick (proving a size cap infeasible, about 35s now against 67s earlier) and a random-puzzle
+benchmark. Roughly 60,000 extra redundant clauses made the benchmark slower (158s to 202s). A two-stage
+relaxation that solved in 0.32s turned out to be wrong, because it let states claim more area than the
+board has. `linearization_level=0` raised conflicts per second but was slower to a solution (2,492s vs
+1,580s, one run each), so it is not the default.
+
+**Engineering.** The solver is a `capitols/` package with one module per layer (geometry, symmetry,
+propagation, model, runner), so propagation is unit-tested without solving. The refactor was checked
+by hashing the CP-SAT model for 18 configurations before and after: all identical. Correctness rests on
+the brute-force oracle (equivalence on 3×3 and 4×4, including deliberately broken models) and 52 tests.
+
 ## Approach
 
 The puzzle is encoded as a constraint satisfaction problem and solved with CP-SAT. The model is a
@@ -118,7 +159,9 @@ project interpreter (`.venv/bin/python`) so the right `ortools` is picked up.
     .venv/bin/python solve.py main --logfile main.log    # 11x11 puzzle
 
 Options: `--workers N`, `--time SECONDS` (limit per solve; hitting it raises and exits with code 1),
-`--heartbeat SECONDS`, `--logfile PATH`, `--cpsat-log` (raw CP-SAT log).
+`--heartbeat SECONDS`, `--logfile PATH`, `--cpsat-log` (raw CP-SAT log), `--param NAME=VALUE`
+(any raw CP-SAT parameter). The search restrictions used for `main` are `--min-max-size`
+and `--require-free-r2`; see `--help` for the rest.
 
 ## Tests and benchmarks
 
@@ -131,8 +174,13 @@ Options: `--workers N`, `--time SECONDS` (limit per solve; hitting it raises and
 
 | Path | Contents |
 |---|---|
-| `solve.py` | model builder, solve loop with lazy capitol verification, CLI |
+| `solve.py` | command-line entry point and import shim |
+| `capitols/grid.py`, `symmetry.py` | board geometry; transforms, dominance, full-group capitol check |
+| `capitols/propagate.py` | compile-time bounds, root-region pruning |
+| `capitols/problem.py`, `model.py` | everything derived from the clues; the CP-SAT model, one method per constraint family |
+| `capitols/runner.py`, `cli.py`, `config.py`, `puzzles.py` | solve and verification loop; CLI; options; clue sets |
 | `problem.md` | problem statement, 11×11 grid, 5×5 worked example |
+| `FINDINGS.md`, `HANDOVER.md` | measured results and negative results; next steps |
 | `bench.py` | random solvable puzzles and timing harness |
 | `tests/reference.py` | brute-force oracle written from the problem statement |
-| `tests/test_*.py` | helper checks, oracle sanity, the 5×5 example, solution-set equivalence |
+| `tests/test_*.py` | helper checks, propagation, oracle sanity, the 5×5 example, solution-set equivalence |
